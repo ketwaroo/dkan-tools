@@ -4,6 +4,7 @@ namespace DkanTools\Command;
 
 use DkanTools\Util\Util;
 use Symfony\Component\Console\Input\InputOption;
+use Robo\ResultData;
 
 /**
  * This is project's console commands configuration for Robo task runner.
@@ -12,6 +13,41 @@ use Symfony\Component\Console\Input\InputOption;
  */
 class TestCommands extends \Robo\Tasks
 {
+    
+    /**
+     * Initialize test folders and install dependencies in directory.
+     */
+    private function testInstallDependencies($dir) {
+        if (!file_exists($dir . '/vendor')) {
+            $this->io()->section('Installing test dependencies in ' . $dir);
+            $this->taskExec('composer install --prefer-source --no-interaction')
+                ->dir($dir)
+                ->run();
+        }
+    }
+
+    /**
+     * Initialize test subdirectories
+     */
+    private function testInitTestDirs($dir) {
+        if (!file_exists($dir . '/assets')) {
+            $this->io()->section('Creating test subdirectories in ' . $dir);
+            $this->_mkdir($dir . '/assets/junit');
+        }
+    }
+
+    /**
+     * Establish links from a test environment to an environment with installed
+     * test dependencies.
+     */
+    private function testLink($src_dir, $dest_dir) {
+        $this->io()->section('Linking test environment ' . $dest_dir . ' to ' . $src_dir);
+        $this->_mkdir($dest_dir . '/bin');
+        $this->_symlink('../../../' . $src_dir . '/bin/behat', $dest_dir . '/bin/behat');
+        $this->_symlink('../../../' . $src_dir . '/bin/phpunit', $dest_dir . '/bin/phpunit');
+        $this->_symlink('../../' . $src_dir . '/vendor', $dest_dir . '/vendor');
+    }
+    
     /**
      * Initialize test folders and install dependencies for running tests.
      *
@@ -22,16 +58,53 @@ class TestCommands extends \Robo\Tasks
      */
     public function testInit()
     {
-        if (!file_exists('dkan/test/vendor')) {
-            $this->io()->section('Installing test dependencies.');
-            $this->taskExec('composer install --prefer-source --no-interaction')
-                ->dir('dkan/test')
-                ->run();
+        $this->testInstallDependencies('dkan/test');
+        $this->testInitTestDirs('dkan/test');
+        if (is_dir('src/test')) {
+            $this->testInitTestDirs('src/test');
+            $this->testLink('dkan/test', 'src/test');
         }
-        if (!file_exists('dkan/test/assets')) {
-            $this->io()->section('Creating test subdirectories.');
-            $this->_mkdir('dkan/test/assets/junit');
+    }
+
+    /**
+     * For each file in the array $paths, make sure it exists.  If not, throw an
+     * Exception.
+     */
+    private function _ensureFilesExist(array $paths, $message) {
+        foreach ($paths as $path) {
+            if (! file_exists($path)) {
+                $this->io()->error("${message} ${path} is missing.");
+                throw new \Exception("{$path} is missing.");
+            }
         }
+    }
+
+    /**
+     * Helper function to run Behat tests in a particular directory.
+     * 
+     * @param string $dir test directory
+     * @param string $suite name of the test suite to run
+     * @param array $args additional arguments to pass to behat.
+     */
+    private function _testBehat($dir, $suite, array $args)
+    {
+        $files = array($dir . '/behat.yml', $dir . '/behat.docker.yml');
+        $this->_ensureFilesExist($files, 'Behat config file');
+        $this->testInit();
+        $behatExec = $this->taskExec('bin/behat')
+            ->dir($dir)
+            ->arg('--colors')
+            ->arg('--suite=' . $suite)
+            ->arg('--format=pretty')
+            ->arg('--out=std')
+            ->arg('--format=junit')
+            ->arg('--out=assets/junit')
+            ->arg('--config=behat.docker.yml');
+
+        foreach ($args as $arg) {
+            $behatExec->arg($arg);
+        }
+        return $behatExec->run();
     }
 
     /**
@@ -50,28 +123,51 @@ class TestCommands extends \Robo\Tasks
      */
     public function testBehat(array $args)
     {
+        return $this->_testBehat('dkan/test', 'dkan', $args);
+    }
+
+    /**
+     * Runs custom Behat tests.
+     *
+     * Runs custom Behat tests. Pass any additional behat options as
+     * arguments. For example:
+     *
+     * dktl test:behat-custom --name="Datastore API"
+     *
+     * or
+     *
+     * dktl test:behat-custom features/workflow.feature
+     *
+     * @param array $args  Arguments to append to behat command.
+     */
+    public function testBehatCustom(array $args)
+    {
+        return $this->_testBehat('src/test', 'custom', $args);
+    }
+
+    /**
+     * Helper function to run PHPUnit tests in a particular directory.
+     * 
+     * @param string $dir test directory
+     * @param array $args additional arguments to pass to PHPUnit.
+     */
+    public function _testPhpunit($dir, array $args)
+    {
+        $files = array($dir . '/phpunit/phpunit.xml');
+        $this->_ensureFilesExist($files, 'PhpUnit config file');
         $this->testInit();
-        $behatExec = $this->taskExec('bin/behat')
-            ->dir('dkan/test')
-            ->arg('--colors')
-            ->arg('--suite=dkan')
-            ->arg('--format=pretty')
-            ->arg('--out=std')
-            ->arg('--format=junit')
-            ->arg('--out=assets/junit')
-            ->arg('--config=behat.docker.yml');
+        $phpunitExec = $this->taskExec('bin/phpunit --verbose')
+            ->dir($dir)
+            ->arg('--configuration=phpunit');
 
         foreach ($args as $arg) {
-            $behatExec->arg($arg);
+            $phpunitExec->arg($arg);
         }
-        return $behatExec->run();
+        return $phpunitExec->run();
     }
 
     /**
      * Runs DKAN core PhpUnit tests.
-     *
-     * Runs DKAN core PhpUnit tests. Pass any additional PhpUnit options as
-     * arguments. For example:
      *
      * dktl test:phpunit --testsuite="DKAN Harvest Test Suite"
      *
@@ -81,15 +177,21 @@ class TestCommands extends \Robo\Tasks
      */
     public function testPhpunit(array $args)
     {
-        $this->testInit();
-        $phpunitExec = $this->taskExec('bin/phpunit --verbose')
-            ->dir('dkan/test')
-            ->arg('--configuration=phpunit');
+        return $this->_testPhpunit('dkan/test', $args);
+    }
 
-        foreach ($args as $arg) {
-            $phpunitExec->arg($arg);
-        }
-        return $phpunitExec->run();
+    /**
+     * Runs custom PhpUnit tests.
+     *
+     * dktl test:phpunit-custom --testsuite="DKAN Harvest Test Suite"
+     *
+     * @see https://phpunit.de/manual/6.5/en/textui.html
+     *
+     * @param array $args  Arguments to append to full phpunit command.
+     */
+    public function testPhpunitCustom(array $args)
+    {
+        return $this->_testPhpunit('src/test', $args);
     }
 
     public function testCypress()
